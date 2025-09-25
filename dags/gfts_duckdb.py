@@ -19,12 +19,25 @@ URL_VEHICLE = "https://www.data.gouv.fr/api/1/datasets/r/5f571595-aef1-480f-acde
 default_args = {"owner": "airflow", "retries": 1, "retry_delay": timedelta(minutes=2)}
 
 def download_file(url, out):
+    """
+    Télécharge un fichier depuis une URL et l'enregistre localement.
+
+    Parameters
+    ----------
+    url : str
+        URL du fichier à télécharger.
+    out : str
+        Chemin de sortie où enregistrer le fichier.
+    """
     r = requests.get(url, timeout=30)
     r.raise_for_status()
     with open(out, "wb") as f:
         f.write(r.content)
 
 def extract_static():
+    """
+    Télécharge et extrait les fichiers GTFS statiques (format zip) dans le dossier `data/static`.
+    """
     os.makedirs(DATA, exist_ok=True)
     zip_path = f"{DATA}/static_gtfs.zip"
     download_file(URL_STATIC, zip_path)
@@ -32,144 +45,165 @@ def extract_static():
         z.extractall(f"{DATA}/static")
 
 def extract_rt_tripupdates():
+    """
+    Télécharge les mises à jour temps réel des trajets (trip updates) au format Protocol Buffer.
+    """
+    os.makedirs(DATA, exist_ok=True)
     download_file(URL_TRIPUP, f"{DATA}/trip_updates.pb")
 
 def extract_rt_vehiclepos():
+    """
+    Télécharge les positions temps réel des véhicules (vehicle positions) au format Protocol Buffer.
+    """
+    os.makedirs(DATA, exist_ok=True)
     download_file(URL_VEHICLE, f"{DATA}/vehicle_pos.pb")
 
 def transform_static():
-    os.makedirs("/opt/airflow/warehouse", exist_ok=True)
-    con = duckdb.connect(WAREHOUSE)
-    
-    for fname in ["stops", "routes", "trips", "stop_times", "shapes", "feed_info", "calendar", "calendar_dates", "agency"]:
-        path = f"{DATA}/static/{fname}.txt"
-        con.execute(f"CREATE OR REPLACE TABLE {fname} AS SELECT * FROM read_csv_auto('{path}', ALL_VARCHAR=TRUE)")
-    con.close()
+    """
+    Transforme les fichiers GTFS statiques (TXT) en tables DuckDB, en les important dans le warehouse.
+    Toutes les colonnes sont importées en tant que chaînes (ALL_VARCHAR).
+    """
+    os.makedirs(os.path.dirname(WAREHOUSE), exist_ok=True)
+    with duckdb.connect(WAREHOUSE) as con:
+        for fname in ["stops", "routes", "trips", "stop_times", "shapes", "feed_info", "calendar", "calendar_dates", "agency"]:
+            path = f"{DATA}/static/{fname}.txt"
+            con.execute(f"CREATE OR REPLACE TABLE {fname} AS SELECT * FROM read_csv_auto('{path}', ALL_VARCHAR=TRUE)")
 
 def init_schema():
-    con = duckdb.connect(WAREHOUSE)
-    # Supprimer proprement en cascade
-    con.execute("DROP TABLE IF EXISTS Fact_Event CASCADE")
-    con.execute("DROP TABLE IF EXISTS Dim_stop CASCADE")
-    con.execute("DROP TABLE IF EXISTS Dim_trip CASCADE")
-    con.execute("DROP TABLE IF EXISTS Dim_route CASCADE")
-    con.execute("DROP TABLE IF EXISTS Dim_time CASCADE")
+    """
+    Initialise le schéma du data warehouse DuckDB :
+    - Crée les dimensions (stop, trip, route, time)
+    - Crée la table de faits (Fact_Event) si elles n'existent pas.
+    """
+    with duckdb.connect(WAREHOUSE) as con:
+        # con.execute("DROP TABLE IF EXISTS Fact_Event CASCADE")
+        # con.execute("DROP TABLE IF EXISTS Dim_stop CASCADE")
+        # con.execute("DROP TABLE IF EXISTS Dim_trip CASCADE")
+        # con.execute("DROP TABLE IF EXISTS Dim_route CASCADE")
+        # con.execute("DROP TABLE IF EXISTS Dim_time CASCADE")
 
-    con.execute("""
-        CREATE OR REPLACE TABLE Dim_stop (
-            stop_id VARCHAR PRIMARY KEY,
-            stop_name VARCHAR,
-            stop_lat DOUBLE,
-            stop_lon DOUBLE
-        )
-    """)
-    con.execute("""
-        CREATE OR REPLACE TABLE Dim_trip (
-            trip_id VARCHAR PRIMARY KEY,
-            trip_headsign VARCHAR,
-            direction_id INTEGER
-        )
-    """)
-    con.execute("""
-        CREATE OR REPLACE TABLE Dim_route (
-            route_id VARCHAR PRIMARY KEY,
-            route_type INTEGER,
-            route_short_name VARCHAR,
-            route_long_name VARCHAR,
-            route_color VARCHAR
-        )
-    """)
-    con.execute("""
-        CREATE OR REPLACE TABLE Fact_Event (
-            event_id VARCHAR PRIMARY KEY,
-            event_ts TIMESTAMP,
-            trip_id VARCHAR REFERENCES Dim_trip(trip_id),
-            route_id VARCHAR REFERENCES Dim_route(route_id),
-            stop_id VARCHAR REFERENCES Dim_stop(stop_id),
-            vehicle_id VARCHAR,
-            arrival_time VARCHAR,
-            departure_time VARCHAR,
-            planned_arrival DOUBLE,
-            planned_departure DOUBLE,
-            arrival_time_rt DOUBLE,
-            departure_time_rt DOUBLE,
-            delay_min DOUBLE,
-            on_time INTEGER,
-            lat DOUBLE,
-            lon DOUBLE
-        )
-    """)
-    con.execute("""
-        CREATE OR REPLACE TABLE Dim_time (
-            time_id VARCHAR PRIMARY KEY,
-            event_ts TIMESTAMP,
-            date DATE,
-            hour INTEGER,
-            minute INTEGER,
-            week INTEGER,
-            month INTEGER,
-            year INTEGER,
-            day INTEGER
-        )
-    """)
-    con.close()
-
+        #CREATE OR REPLACE TABLE???
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS Dim_stop (
+                stop_id VARCHAR PRIMARY KEY,
+                stop_name VARCHAR,
+                stop_lat DOUBLE,
+                stop_lon DOUBLE
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS Dim_trip (
+                trip_id VARCHAR PRIMARY KEY,
+                trip_headsign VARCHAR,
+                direction_id INTEGER
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS Dim_route (
+                route_id VARCHAR PRIMARY KEY,
+                route_type INTEGER,
+                route_short_name VARCHAR,
+                route_long_name VARCHAR,
+                route_color VARCHAR
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS Fact_Event (
+                event_id VARCHAR PRIMARY KEY,
+                event_ts TIMESTAMP,
+                trip_id VARCHAR REFERENCES Dim_trip(trip_id),
+                route_id VARCHAR REFERENCES Dim_route(route_id),
+                stop_id VARCHAR REFERENCES Dim_stop(stop_id),
+                vehicle_id VARCHAR,
+                arrival_time VARCHAR,
+                departure_time VARCHAR,
+                planned_arrival TIMESTAMP,
+                planned_departure TIMESTAMP,
+                arrival_time_rt TIMESTAMP,
+                departure_time_rt TIMESTAMP,
+                delay_min DOUBLE,
+                on_time INTEGER,
+                lat DOUBLE,
+                lon DOUBLE
+            )
+        """)
+        con.execute("""
+            CREATE TABLE IF NOT EXISTS Dim_time (
+                time_id VARCHAR PRIMARY KEY,
+                event_ts TIMESTAMP,
+                date DATE,
+                hour INTEGER,
+                minute INTEGER,
+                week INTEGER,
+                month INTEGER,
+                year INTEGER,
+                day INTEGER
+            )
+        """)
 
 def build_fact_event():
-    os.makedirs("/opt/airflow/warehouse", exist_ok=True)
-    con = duckdb.connect(WAREHOUSE)
+    """
+    Construit la table de faits `Fact_Event` en combinant :
+    - Les données statiques (trips, stops, routes, stop_times)
+    - Les flux temps réel (trip updates et vehicle positions)
+    
+    Calcule :
+    - Les horaires planifiés (en timezone Europe/Paris)
+    - Les horaires temps réel
+    - Les retards en minutes
+    - Le statut de ponctualité (`on_time`)
+    
+    Insère les dimensions et la table de faits dans DuckDB.
+    Crée aussi la dimension temporelle (`Dim_time`) à partir de `event_ts`.
+    """
+    os.makedirs(os.path.dirname(WAREHOUSE), exist_ok=True)
+    PARIS_TZ = pytz.timezone("Europe/Paris")
 
-    #Charger les tables statiques
-    stops = con.execute("SELECT stop_id, stop_name, stop_lat, stop_lon FROM stops").df()
-    #trips = con.execute("SELECT trip_id, trip_headsign, direction_id FROM trips").df()
-    trips = con.execute("SELECT trip_id, route_id, trip_headsign, direction_id FROM trips").df()
-    routes = con.execute("SELECT route_id, route_type, route_short_name, route_long_name, route_color FROM routes").df()
-    #Horaires officiels : arrival_time et departure_time = chaîne "HH:MM:SS"
-    stop_times = con.execute("SELECT trip_id, stop_id, arrival_time, departure_time FROM stop_times").df()
+    with duckdb.connect(WAREHOUSE) as con:
+        # Charger les tables statiques
+        stops = con.execute("SELECT stop_id, stop_name, stop_lat, stop_lon FROM stops").df()
+        trips = con.execute("SELECT trip_id, route_id, trip_headsign, direction_id FROM trips").df()
+        routes = con.execute("SELECT route_id, route_type, route_short_name, route_long_name, route_color FROM routes").df()
+        stop_times = con.execute("SELECT trip_id, stop_id, arrival_time, departure_time FROM stop_times").df()
 
-    #---Conversion des heures prévues en timestamp Unix---
-    LOCAL_TZ = pytz.timezone("Europe/Paris")
-    def arrival_to_unix(t: str, service_date: datetime.date):
-        if pd.isna(t): 
-            return None
-        try:
-            h, m, s = map(int, t.split(":"))
-        except Exception:
-            return None
-        dt = datetime(service_date.year, service_date.month, service_date.day, h % 24, m, s)
-        if h >= 24:  # gérer GTFS > 24h
-            dt = dt + timedelta(days=1)
-        # localiser en Europe/Paris puis convertir en UTC
-        dt = LOCAL_TZ.localize(dt).astimezone(timezone.utc)
-        return dt.timestamp()
+    # Fonction pour convertir HH:MM:SS + date service en timestamp France/Paris
+    def arrival_to_paris_ts(t: str, service_date: datetime.date):
+        if pd.isna(t):
+            return pd.NaT
+        h, m, s = map(int, t.split(":"))
+        day = service_date
+        if h >= 24:
+            h = h % 24
+            day += timedelta(days=1)
+        dt = datetime(day.year, day.month, day.day, h, m, s)
+        return PARIS_TZ.localize(dt)
 
-    #---Récupérer la date du feed realtime---
+    # Charger feed realtime
     feed = gtfs_realtime_pb2.FeedMessage()
     feed.ParseFromString(open(f"{DATA}/trip_updates.pb", "rb").read())
-    service_date = datetime.fromtimestamp(feed.header.timestamp, tz=timezone.utc).date()
+    service_date = datetime.fromtimestamp(feed.header.timestamp, tz=PARIS_TZ).date()
 
-    #---Conversion des horaires officiels avec cette date en UNIX timestamp | Exemple : "16:02:00" → 1.757434e+09---
-    stop_times["planned_arrival"] = stop_times["arrival_time"].apply(lambda t: arrival_to_unix(t, service_date))
-    stop_times["planned_departure"] = stop_times["departure_time"].apply(lambda t: arrival_to_unix(t, service_date))
+    # Ajouter colonnes planifiées avec timezone Paris
+    stop_times["planned_arrival_paris"] = stop_times["arrival_time"].apply(lambda t: arrival_to_paris_ts(t, service_date))
+    stop_times["planned_departure_paris"] = stop_times["departure_time"].apply(lambda t: arrival_to_paris_ts(t, service_date))
 
-    #---TRIP UPDATES (Realtime)---
-    # feed = gtfs_realtime_pb2.FeedMessage()
-    # feed.ParseFromString(open(f"{DATA}/trip_updates.pb", "rb").read())
+    # TRIP UPDATES
     rt_rows = []
     for e in feed.entity:
         if e.HasField("trip_update"):
             trip = e.trip_update.trip.trip_id
             for stu in e.trip_update.stop_time_update:
+                arr_ts = pd.to_datetime(stu.arrival.time, unit="s", utc=True).tz_convert(PARIS_TZ) if stu.HasField("arrival") and stu.arrival.time > 0 else pd.NaT
+                dep_ts = pd.to_datetime(stu.departure.time, unit="s", utc=True).tz_convert(PARIS_TZ) if stu.HasField("departure") and stu.departure.time > 0 else pd.NaT
                 rt_rows.append({
                     "trip_id": trip,
                     "stop_id": stu.stop_id,
-                    #arrival_time_rt et departure_time_rt sont des UNIX timestamp
-                    "arrival_time_rt": stu.arrival.time if stu.HasField("arrival") else None,
-                    "departure_time_rt": stu.departure.time if stu.HasField("departure") else None
+                    "arrival_time_rt_paris": arr_ts,
+                    "departure_time_rt_paris": dep_ts
                 })
     df_rt = pd.DataFrame(rt_rows)
 
-    #---VEHICLE POSITIONS---
+    # VEHICLE POSITIONS
     feed2 = gtfs_realtime_pb2.FeedMessage()
     feed2.ParseFromString(open(f"{DATA}/vehicle_pos.pb", "rb").read())
     vrows = []
@@ -181,164 +215,193 @@ def build_fact_event():
                 "vehicle_id": v.vehicle.id if v.vehicle.id else None,
                 "lat": v.position.latitude if v.HasField("position") else None,
                 "lon": v.position.longitude if v.HasField("position") else None,
-                "vehicle_ts": v.timestamp if v.HasField("timestamp") else None
+                "vehicle_ts": pd.to_datetime(v.timestamp, unit="s", utc=True).tz_convert(PARIS_TZ) if v.HasField("timestamp") and v.timestamp > 0 else pd.NaT
             })
     df_vehicle = pd.DataFrame(vrows)
 
-    #---JOIN Static + RT---
+    # JOIN static + RT + vehicle
     fact = (
         df_rt.merge(stop_times, on=["trip_id", "stop_id"], how="left")
              .merge(trips, on="trip_id", how="left")
              .merge(routes, on="route_id", how="left")
              .merge(df_vehicle, on="trip_id", how="left")
     )
-    #VERIFICATION :
-    print("DEBUT TEST DE LA TABLE FACT--------------------------")
-    print(fact[["trip_id","stop_id","planned_arrival","arrival_time_rt"]].head(10))
-    print("len :", len(fact), len(df_rt), len(stop_times))
-    print("FIN TEST DE LA TABLE FACT--------------------------")
 
-    #---Calcul du retard---
-    fact["arrival_time_rt"] = pd.to_numeric(fact["arrival_time_rt"], errors="coerce")
-    # Nettoyage : remplacer 0 par NaN (valeur manquante)
-    fact.loc[fact["arrival_time_rt"] == 0, "arrival_time_rt"] = pd.NA
-
-    fact["delay_min"] = (fact["arrival_time_rt"] - fact["planned_arrival"]) / 60
-    fact["delay_min"] = fact["delay_min"].where(fact["arrival_time_rt"].notna())
+    # Calcul du retard en minutes
+    fact["delay_min"] = (fact["arrival_time_rt_paris"] - fact["planned_arrival_paris"]).dt.total_seconds() / 60
+    fact.loc[fact["arrival_time_rt_paris"].isna(), "delay_min"] = pd.NA
     fact["on_time"] = fact["delay_min"].apply(lambda d: 1 if pd.notna(d) and d <= 5 else 0)
 
-    print("______________________TEST__________________________")
-    print("Delay sample:", fact[["planned_arrival","arrival_time_rt","delay_min"]].head(10))
-    print("____________________END TEST________________________")
-
-    #---Colonnes finales---
+    # Construire DataFrame final pour DuckDB
     fact_event = pd.DataFrame({
         "event_id": [str(uuid.uuid4()) for _ in range(len(fact))],
-        "event_ts": pd.to_datetime(fact["vehicle_ts"], unit="s", utc=True),
+        "event_ts": fact["vehicle_ts"].dt.tz_localize(None) if fact["vehicle_ts"].notna().any() else pd.NaT,
         "trip_id": fact["trip_id"],
         "route_id": fact["route_id"],
         "stop_id": fact["stop_id"],
         "vehicle_id": fact["vehicle_id"],
         "arrival_time": fact["arrival_time"],
         "departure_time": fact["departure_time"],
-        "planned_arrival": fact["planned_arrival"], #float UNIX timestamp
-        "planned_departure": fact["planned_departure"],
-        "arrival_time_rt": fact["arrival_time_rt"], #float UNIX timestamp
-        "departure_time_rt": fact["departure_time_rt"],
-        "delay_min": fact["delay_min"], #float minutes
+        "planned_arrival": fact["planned_arrival_paris"].dt.tz_localize(None),
+        "planned_departure": fact["planned_departure_paris"].dt.tz_localize(None),
+        "arrival_time_rt": fact["arrival_time_rt_paris"].dt.tz_localize(None),
+        "departure_time_rt": fact["departure_time_rt_paris"].dt.tz_localize(None),
+        "delay_min": fact["delay_min"],
         "on_time": fact["on_time"],
         "lat": fact["lat"],
         "lon": fact["lon"]
     })
 
-    # #Sauvegarde dans DuckDB
-    # con.register("df", fact_event)
-    # con.execute("CREATE OR REPLACE TABLE Fact_Event AS SELECT * FROM df")
+    # Insertions DuckDB
+    with duckdb.connect(WAREHOUSE) as con:
+        con.register("df_stops", stops)
+        con.execute("INSERT OR REPLACE INTO Dim_stop SELECT * FROM df_stops")
 
-    # #Dimensions
-    # con.execute("CREATE OR REPLACE TABLE Dim_stop AS SELECT DISTINCT stop_id, stop_name, stop_lat, stop_lon FROM stops")
-    # con.execute("CREATE OR REPLACE TABLE Dim_trip AS SELECT DISTINCT trip_id, trip_headsign, direction_id FROM trips")
-    # con.execute("CREATE OR REPLACE TABLE Dim_route AS SELECT DISTINCT route_id, route_type, route_short_name, route_long_name, route_color FROM routes")
+        con.register("df_trips", trips.drop(columns=["route_id"]))
+        con.execute("INSERT OR REPLACE INTO Dim_trip SELECT * FROM df_trips")
 
-    # --- Insertions (plus de CREATE seulement INSERT) ---
-    con.register("df_stops", stops)
-    con.execute("INSERT OR REPLACE INTO Dim_stop SELECT * FROM df_stops")
+        con.register("df_routes", routes)
+        con.execute("INSERT OR REPLACE INTO Dim_route SELECT * FROM df_routes")
 
-    trips = trips.drop(columns=["route_id"])
-    con.register("df_trips", trips)
-    con.execute("INSERT OR REPLACE INTO Dim_trip SELECT * FROM df_trips")
+        con.register("df_fact", fact_event)
+        con.execute("INSERT INTO Fact_Event SELECT * FROM df_fact")
 
-    con.register("df_routes", routes)
-    con.execute("INSERT OR REPLACE INTO Dim_route SELECT * FROM df_routes")
+        # Dimension temps
+        fact_event["date"] = fact_event["event_ts"].dt.date
+        fact_event["hour"] = fact_event["event_ts"].dt.hour
+        fact_event["minute"] = fact_event["event_ts"].dt.minute
+        fact_event["week"] = fact_event["event_ts"].dt.isocalendar().week
+        fact_event["month"] = fact_event["event_ts"].dt.month
+        fact_event["year"] = fact_event["event_ts"].dt.year
+        fact_event["day"] = fact_event["event_ts"].dt.day
 
-    con.register("df_fact", fact_event)
-    con.execute("INSERT INTO Fact_Event SELECT * FROM df_fact")
+        dim_time = pd.DataFrame({
+            "time_id": [str(uuid.uuid4()) for _ in range(len(fact_event))],
+            "event_ts": fact_event["event_ts"],
+            "date": fact_event["date"],
+            "hour": fact_event["hour"],
+            "minute": fact_event["minute"],
+            "week": fact_event["week"],
+            "month": fact_event["month"],
+            "year": fact_event["year"],
+            "day": fact_event["day"]
+        })
 
-    #Dimension temps
-    fact_event["date"] = pd.to_datetime(fact_event["event_ts"]).dt.date
-    fact_event["hour"] = pd.to_datetime(fact_event["event_ts"]).dt.hour
-    fact_event["minute"] = pd.to_datetime(fact_event["event_ts"]).dt.minute
-    fact_event["week"] = pd.to_datetime(fact_event["event_ts"]).dt.isocalendar().week
-    fact_event["month"] = pd.to_datetime(fact_event["event_ts"]).dt.month
-    fact_event["year"] = pd.to_datetime(fact_event["event_ts"]).dt.year
-    fact_event["day"] = pd.to_datetime(fact_event["event_ts"]).dt.day
-
-    dim_time = pd.DataFrame({
-        "time_id": [str(uuid.uuid4()) for _ in range(len(fact_event))],
-        "event_ts": fact_event["event_ts"],
-        "date": fact_event["date"],
-        "hour": fact_event["hour"],
-        "minute": fact_event["minute"],
-        "week": fact_event["week"],
-        "month": fact_event["month"],
-        "year": fact_event["year"],
-        "day": fact_event["day"]
-    })
-
-    con.register("df_time", dim_time)
-    con.execute("INSERT INTO Dim_time SELECT * FROM df_time")
-
-    con.close()
-
-
+        con.register("df_time", dim_time)
+        con.execute("INSERT INTO Dim_time SELECT * FROM df_time")
 
 def load_exports():
-    # ts = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M")
-    # outdir = f"{EXPORTS}/{ts}"
-    # os.makedirs(outdir, exist_ok=True)
+    """
+    Exporte les données et indicateurs clés de performance (KPI) au format Parquet dans `exports/latest/`.
+
+    Exports :
+    - Les tables `Fact_Event`, `Dim_stop`, `Dim_trip`, `Dim_route`, `Dim_time`
+    - KPI 1 : Retards moyens par heure
+    - KPI 4 : Pourcentage de ponctualité par ligne
+    - KPI 5 : Heatmap des retards par heure/jour
+    - KPI 6 : Taux global de ponctualité
+    - KPI 7 : Évolution du retard par arrêt
+    """
     outdir = f"{EXPORTS}/latest"
-    # Supprime tout ce qui est dans le dossier s'il existe
     if os.path.exists(outdir):
         shutil.rmtree(outdir)
     os.makedirs(outdir, exist_ok=True)
 
+    with duckdb.connect(WAREHOUSE, read_only=True) as con:
+        for table in ["Fact_Event", "Dim_stop", "Dim_trip", "Dim_route", "Dim_time"]:
+            con.execute(f"COPY (SELECT * FROM {table}) TO '{outdir}/{table}.parquet' (FORMAT PARQUET)")
+        
+        # KPI 1. Retards moyens par heure de la journée, tout en SQL
+        df_kpi_delay = con.execute("""
+            WITH hours AS (
+                SELECT range AS local_hour
+                FROM range(0, 24)  -- Génère les heures 0 à 23
+            )
+            SELECT 
+                h.local_hour,
+                COALESCE(AVG(f.delay_min), 0) AS avg_delay,
+                COALESCE(COUNT(f.event_id), 0) AS n_events
+            FROM hours h
+            LEFT JOIN Fact_Event f
+                ON EXTRACT(hour FROM f.event_ts AT TIME ZONE 'Europe/Paris') = h.local_hour
+                AND f.delay_min IS NOT NULL
+                AND f.event_ts IS NOT NULL
+            GROUP BY h.local_hour
+            ORDER BY h.local_hour
+        """).df()
 
-    con = duckdb.connect(WAREHOUSE)
+        df_kpi_delay.to_parquet(f"{outdir}/kpi_avg_delay.parquet", index=False)
+        #KPI 2 directement sur fichier streamlit avec le fichier parquet de la table fact_event
+        #KPI 3 directement sur fichier streamlit (dimestop et event)
+        # KPI 4. Retard moyen par ligne ou % de on_time 
+        df_kpi_ontime = con.execute("""
+            SELECT 
+                r.route_id,
+                COALESCE(100.0 * SUM(f.on_time) / NULLIF(COUNT(f.on_time),0), 0) AS pct_on_time
+            FROM Dim_route r
+            LEFT JOIN Fact_Event f
+                ON r.route_id = f.route_id
+            GROUP BY r.route_id
+            ORDER BY r.route_id
+        """).df()
+        df_kpi_ontime.to_parquet(f"{outdir}/kpi_ontime_route.parquet", index=False)
 
-    #Exporter le modèle en étoile (Fact + Dim)
-    for table in ["Fact_Event", "Dim_stop", "Dim_trip", "Dim_route", "Dim_time"]:
-        con.execute(f"COPY (SELECT * FROM {table}) TO '{outdir}/{table}.parquet' (FORMAT PARQUET)")
+        #KPI 5. Heatmap heures × jours
+        df_kpi_by_hour = con.execute("""
+            SELECT 
+                EXTRACT(hour FROM d.event_ts AT TIME ZONE 'Europe/Paris') AS local_hour,
+                EXTRACT(dow  FROM d.event_ts AT TIME ZONE 'Europe/Paris') AS dow,
+                AVG(f.delay_min) AS avg_delay
+            FROM Fact_Event f
+            JOIN Dim_time d ON f.event_ts = d.event_ts
+            WHERE f.delay_min IS NOT NULL
+            GROUP BY local_hour, dow
+            ORDER BY dow, local_hour
+        """).df()
+        df_kpi_by_hour.to_parquet(f"{outdir}/kpi_delay_by_hour.parquet", index=False)
 
-    #---KPI---
+        # KPI 6. Taux de ponctualité global
+        df_kpi_global_ontime = con.execute("""
+            SELECT
+                SUM(CASE WHEN delay_min <= 5 THEN 1 ELSE 0 END) * 100.0 / COUNT(*) AS pct_on_time,
+                COUNT(*) AS n_events
+            FROM Fact_Event
+            WHERE delay_min IS NOT NULL
+        """).df()
+        df_kpi_global_ontime.to_parquet(f"{outdir}/kpi_global_ontime.parquet", index=False)
 
-    #1. Retard moyen global (KPI 1)
-    df_kpi_delay = con.execute("""
-        SELECT AVG(delay_min) AS avg_delay, COUNT(*) AS n_events
-        FROM Fact_Event
-    """).df()
-    df_kpi_delay.to_parquet(f"{outdir}/kpi_avg_delay.parquet", index=False)
+        # KPI 7. Evolution du retard par arrêt (avec nom d’arrêt)
+        df_kpi_delay_stop = con.execute("""
+            SELECT 
+                f.stop_id,
+                s.stop_name,
+                d.event_ts,
+                AVG(f.delay_min) AS avg_delay
+            FROM Fact_Event f
+            JOIN Dim_time d ON f.event_ts = d.event_ts
+            LEFT JOIN Dim_stop s ON f.stop_id = s.stop_id
+            WHERE f.delay_min IS NOT NULL
+            GROUP BY f.stop_id, s.stop_name, d.event_ts
+            ORDER BY f.stop_id, d.event_ts
+        """).df()
+        df_kpi_delay_stop.to_parquet(f"{outdir}/kpi_delay_stop.parquet", index=False)
 
-    #2. Taux de ponctualité par ligne (<= 5 min de retard) (KPI 6)
-    df_kpi_ontime = con.execute("""
-        SELECT route_id, 
-               100.0 * SUM(on_time) / COUNT(*) AS pct_on_time
-        FROM Fact_Event
-        GROUP BY route_id
-    """).df()
-    df_kpi_ontime.to_parquet(f"{outdir}/kpi_ontime_route.parquet", index=False)
+"""
+DAG Airflow `gtfs_duckdb` : Extraction, transformation, et chargement des données GTFS (transport public)
+en temps réel et statiques dans DuckDB, avec génération d'indicateurs pour visualisation via Streamlit.
 
-    #3. Moyenne des retards par heure de la journée (KPI 5)
-    df_kpi_by_hour = con.execute("""
-        SELECT 
-            EXTRACT(hour FROM d.event_ts AT TIME ZONE 'Europe/Paris') AS local_hour,
-            AVG(f.delay_min) AS avg_delay
-        FROM Fact_Event f
-        JOIN Dim_time d ON f.event_ts = d.event_ts
-        WHERE f.delay_min IS NOT NULL
-        GROUP BY local_hour
-        ORDER BY local_hour
-    """).df()
-    df_kpi_by_hour.to_parquet(f"{outdir}/kpi_delay_by_hour.parquet", index=False)
-
-    con.close()
-
+Fréquence : Toutes les 15 minutes
+Source : Données GTFS France (data.gouv.fr)
+Destinations : DuckDB + fichiers Parquet (exports)
+"""
 with DAG(
     "gtfs_duckdb",
     default_args=default_args,
-    schedule="*/15 * * * *",  # toutes les 15 minutes
+    schedule="*/15 * * * *",
     start_date=datetime(2025,1,1),
     catchup=False,
-    max_active_tasks=1, #1 tâche à la fois
+    max_active_tasks=1,
+    max_active_runs=1,
 ) as dag:
 
     t1 = PythonOperator(task_id="extract_static", python_callable=extract_static)
@@ -350,4 +413,3 @@ with DAG(
     t7 = PythonOperator(task_id="load_exports", python_callable=load_exports)
 
     [t1, t2, t3] >> t4 >> t5 >> t6 >> t7
-

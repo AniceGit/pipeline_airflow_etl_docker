@@ -334,6 +334,18 @@ services:
       <<: *airflow-common-depends-on
       airflow-init:
         condition: service_completed_successfully
+        
+  streamlit:
+    build:
+      context: ./app
+      dockerfile: Dockerfile
+    container_name: streamlit_app
+    volumes:
+      - ./exports:/opt/airflow/exports  # partage des exports
+    ports:
+      - "8501:8501"
+    environment:
+      - BASE=/opt/airflow
 
 volumes:
   postgres-db-volume:
